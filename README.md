@@ -17,9 +17,10 @@ Ein schlanker, selbst gehosteter Clipboard-Server für den Heimnetz-Einsatz. Tex
 - **Web-UI** mit Live-Vorschau, Typ-Erkennung (Text, Code, Link, Bild, Datei) und Filter
 - **Screenshots** direkt per Strg+V in die Seite einfügen
 - **Drag & Drop** für Dateien und Bilder
-- **HTTPS** mit automatisch generiertem selbstsigniertem Zertifikat (via `openssl`)
+- **HTTPS** standardmäßig aktiv, selbstsigniertes Zertifikat wird automatisch erstellt
 - **Auth-Token** als zweite Verteidigungslinie gegen Gäste im Netz
 - **Terminal-Integration** via `pbpush`, `pbpull`, `pblast`, `pblist` — nur `python3`
+- **Binärdateien** (ZIP, PDF, Bilder, …) pushen und wieder als Datei pullen
 - **Auto-Refresh** der Web-UI alle 8 Sekunden
 - Keine Datenbank, keine Dependencies — eine einzige `.py`-Datei, Daten in `clipsync_data.json`
 
@@ -42,12 +43,13 @@ Ein schlanker, selbst gehosteter Clipboard-Server für den Heimnetz-Einsatz. Tex
 git clone https://github.com/DEIN-USER/clipsync.git
 cd clipsync
 
-# 2. Starten (HTTP, kein Auth – für reines Heimnetz ok)
+# 2. Starten (HTTPS ist Standard, kein Auth)
 python3 clipsync_server.py
 
 # 3. Browser öffnen
-# http://localhost:8765
-# http://192.168.x.x:8765  (andere Rechner im LAN)
+# https://localhost:8765
+# https://192.168.x.x:8765  (andere Rechner im LAN)
+# → Browser-Warnung einmalig bestätigen (selbstsigniertes Zertifikat)
 ```
 
 ---
@@ -61,18 +63,18 @@ Alle Einstellungen werden per **Umgebungsvariable** gesetzt — keine Konfig-Dat
 | `CLIPSYNC_PORT` | `8765` | Port des Servers |
 | `CLIPSYNC_HOST` | `0.0.0.0` | Bind-Adresse (`127.0.0.1` für nur-lokal) |
 | `CLIPSYNC_TOKEN` | *(leer)* | Auth-Token; leer = kein Auth |
-| `CLIPSYNC_HTTPS` | `0` | HTTPS aktivieren: `1`, `true` oder `yes` |
+| `CLIPSYNC_HTTPS` | `1` | HTTPS Standard; deaktivieren mit `0`, `false` oder `no` |
 | `CLIPSYNC_CERT` | `clipsync.crt` | Pfad zum TLS-Zertifikat |
 | `CLIPSYNC_KEY` | `clipsync.key` | Pfad zum privaten TLS-Schlüssel |
 
 ### Beispiele
 
 ```bash
-# HTTP, kein Auth
-python3 clipsync_server.py
+# HTTPS mit Auth-Token (empfohlen, HTTPS ist Standard)
+CLIPSYNC_TOKEN=meingeheimestoken python3 clipsync_server.py
 
-# HTTPS mit Auth-Token
-CLIPSYNC_HTTPS=1 CLIPSYNC_TOKEN=meingeheimestoken python3 clipsync_server.py
+# HTTP explizit erzwingen (nicht empfohlen – schränkt Browser-Features ein)
+CLIPSYNC_HTTPS=0 python3 clipsync_server.py
 
 # Anderen Port verwenden
 CLIPSYNC_PORT=9000 python3 clipsync_server.py
@@ -81,23 +83,23 @@ CLIPSYNC_PORT=9000 python3 clipsync_server.py
 CLIPSYNC_HOST=127.0.0.1 python3 clipsync_server.py
 
 # Eigenes Zertifikat verwenden
-CLIPSYNC_HTTPS=1 CLIPSYNC_CERT=/etc/ssl/my.crt CLIPSYNC_KEY=/etc/ssl/my.key \
-  python3 clipsync_server.py
+CLIPSYNC_CERT=/etc/ssl/my.crt CLIPSYNC_KEY=/etc/ssl/my.key python3 clipsync_server.py
 ```
 
 ---
 
 ## HTTPS
 
-Beim ersten Start mit `CLIPSYNC_HTTPS=1` wird automatisch ein **selbstsigniertes Zertifikat** für 10 Jahre erstellt — kein manueller `openssl`-Aufruf nötig.
+HTTPS ist **standardmäßig aktiv**. Beim ersten Start wird automatisch ein **selbstsigniertes Zertifikat** für 10 Jahre erstellt — kein manueller `openssl`-Aufruf nötig.
+
+Falls `openssl` nicht verfügbar ist, fällt der Server auf HTTP zurück und zeigt eine Warnung. HTTP schränkt Browser-Features ein (Clipboard-API für Bilder, Secure Cookies).
 
 Das Zertifikat gilt für:
-- `localhost`
-- `127.0.0.1`
+- `localhost` und `127.0.0.1`
 - Die aktuelle LAN-IP des Rechners (z.B. `192.168.1.42`)
 - Den Hostnamen des Rechners
 
-Die Dateien `clipsync.crt` und `clipsync.key` werden neben dem Script gespeichert und beim nächsten Start wiederverwendet.
+Die Dateien `clipsync.crt` und `clipsync.key` werden neben dem Script gespeichert und beim nächsten Start wiederverwendet — keine erneute Generierung.
 
 ### Browser-Warnung (einmalig)
 
@@ -115,119 +117,116 @@ Nach einmaliger Bestätigung ist die Ausnahme dauerhaft gespeichert.
 
 ## Terminal-Integration
 
-Das eingebaute **`$ hilfe`-Panel** in der Web-UI generiert ein Bashrc-Snippet mit der korrekten IP, dem Port und dem Token — fertig zum Einfügen.
+Das eingebaute **`$ hilfe`-Panel** in der Web-UI generiert ein Bashrc-Snippet mit der korrekten IP, dem Port und dem Token vorausgefüllt — fertig zum Einfügen.
 
-### Manuell einrichten
+### Setup
 
-In `~/.bashrc` (oder `~/.zshrc`) einfügen:
-
-```bash
-# ── ClipSync ────────────────────────────────────────────────
-CLIPSYNC_HOST="https://192.168.1.42:8765"   # oder http://
-CLIPSYNC_TOKEN="meintoken"                  # leer lassen wenn kein Auth
-
-_cs_request() {
-  local url="$CLIPSYNC_HOST$1"
-  python3 -c "
-import urllib.request, urllib.error, json, ssl, os, sys
-url  = sys.argv[1]
-meth = sys.argv[2] if len(sys.argv) > 2 else 'GET'
-body = sys.argv[3].encode() if len(sys.argv) > 3 else None
-ctx  = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode    = ssl.CERT_NONE          # ok fuer selbstsigniertes LAN-Cert
-req = urllib.request.Request(url, data=body, method=meth,
-      headers={'Content-Type': 'application/json',
-               'X-Token': os.environ.get('CLIPSYNC_TOKEN','')})
-try:
-    resp = urllib.request.urlopen(req, context=ctx)
-    print(resp.read().decode())
-except urllib.error.HTTPError as e:
-    print('HTTP', e.code, e.reason, file=sys.stderr)
-" "$url" "$@"
-}
-
-# Letzten Eintrag ausgeben
-pbpull() {
-  python3 -c "
-import json, sys
-data = json.loads(sys.stdin.read())
-print(data.get('content',''))
-" <<< "$(_cs_request /api/latest)"
-}
-
-# Letzten Eintrag ausgeben UND in Clipboard kopieren
-pblast() {
-  local content
-  content=$(pbpull)
-  echo "$content"
-  if command -v xclip &>/dev/null; then
-    echo -n "$content" | xclip -selection clipboard && echo "→ Clipboard (xclip)"
-  elif command -v pbcopy &>/dev/null; then
-    echo -n "$content" | pbcopy && echo "→ Clipboard (pbcopy)"
-  else
-    echo "(xclip/pbcopy nicht gefunden)" >&2
-  fi
-}
-
-# Eintrag pushen
-# Verwendung:  pbpush "text"   ODER   echo "text" | pbpush
-pbpush() {
-  local content="${1:-$(cat)}"
-  local result
-  result=$(_cs_request /api/push POST "$(python3 -c "
-import json,sys
-print(json.dumps({'content':sys.argv[1]}))
-" "$content")")
-  python3 -c "
-import json,sys
-d=json.loads(sys.argv[1])
-print('OK:', d.get('id','?'), '('+d.get('type','?')+')')
-" "$result"
-}
-
-# Alle Einträge auflisten (letzte 20)
-pblist() {
-  python3 -c "
-import json, sys, os
-data  = json.loads(sys.stdin.read())
-entries = data.get('entries', [])[:20]
-for e in entries:
-    t     = e.get('type','?')
-    label = e.get('label','') or (e.get('content','')[:50].replace('\n',' '))
-    ts    = e.get('ts', 0) // 1000
-    print(f\"{e['id']}  [{t:5}]  {label}\")
-" <<< "$(_cs_request /api/entries)"
-}
-# ─────────────────────────────────────────────────────────────
-```
-
-Nach dem Einfügen:
+Den Block aus der Web-UI kopieren (`$ hilfe`-Button), in `~/.bashrc` (oder `~/.zshrc`) einfügen, dann:
 
 ```bash
 source ~/.bashrc
 ```
 
-### Verwendung
+Die zwei wichtigsten Variablen die gesetzt werden:
 
 ```bash
-# Text pushen
-pbpush "das ist mein text"
-
-# Pipe pushen
-git log --oneline | pbpush
-cat /etc/hosts | pbpush
-pwd | pbpush
-
-# Letzten Eintrag holen
-pbpull               # nur Ausgabe im Terminal
-pblast               # Ausgabe + direkt in Clipboard
-
-# Alle Einträge auflisten
-pblist
+CLIPSYNC_HOST="https://192.168.1.42:8765"
+CLIPSYNC_TOKEN="meintoken"   # leer lassen wenn kein Auth
 ```
 
-> **Kein curl, kein wget** — alle Funktionen nutzen ausschließlich `python3` aus der Standardbibliothek.
+---
+
+## pbpush — Inhalte pushen
+
+### Text
+
+```bash
+pbpush "das ist mein text"          # Text direkt
+echo "hallo welt" | pbpush          # aus Pipe
+git log --oneline | pbpush          # Ausgabe eines Befehls
+cat /etc/hosts | pbpush             # Dateiinhalt als Text
+pbpush "mein text" "mein label"     # mit Label
+```
+
+### Dateien und Binärdaten
+
+```bash
+pbpush bild.png                     # Bild → wird als image-Typ gespeichert
+pbpush screenshot.jpg "vom laptop"  # Bild mit Label
+pbpush archiv.zip                   # Binärdatei → Base64-kodiert gespeichert
+pbpush dokument.pdf "Q3 Report"     # PDF mit Label
+pbpush script.py                    # Textdatei → als code-Typ erkannt
+pbpush config.yaml                  # Konfigurationsdatei
+```
+
+**Typ-Erkennung** erfolgt automatisch anhand MIME-Type und Dateiendung:
+
+| Dateiart | Gespeicherter Typ |
+|---|---|
+| `.png`, `.jpg`, `.gif`, `.webp`, `.svg` | `image` |
+| `.py`, `.js`, `.ts`, `.sh`, `.json`, `.yaml`, `.sql`, … | `code` |
+| `.txt`, `.md`, `.csv`, `.log`, … | `file` (als Text) |
+| `.zip`, `.pdf`, `.exe`, `.docx`, … | `file` (Base64) |
+
+---
+
+## pbpull — Inhalte holen
+
+### Text ausgeben
+
+```bash
+pbpull                              # letzten Eintrag auf stdout
+pbpull abc123def                    # bestimmten Eintrag (ID aus pblist)
+```
+
+Bei Binärdateien erscheint statt Zeichensalat ein Hinweis:
+```
+[Binärdatei: archiv.zip]  zum Speichern: pbpull -o archiv.zip
+```
+
+### Als Datei speichern
+
+```bash
+pbpull -o                           # letzten Eintrag speichern (Originalname)
+pbpull -o meine_kopie.zip           # unter eigenem Namen speichern
+pbpull -o ./downloads/              # in Ordner, Originalname beibehalten
+pbpull abc123def -o                 # bestimmten Eintrag speichern (Originalname)
+pbpull abc123def -o ./backup/       # bestimmten Eintrag in Ordner
+pbpull abc123def -o neue_datei.zip  # bestimmten Eintrag umbenennen
+```
+
+Funktioniert für alle Typen — Text wird als UTF-8 gespeichert, Binärdateien werden aus Base64 dekodiert und byte-genau wiederhergestellt.
+
+---
+
+## pblast — Letzten Eintrag in Clipboard
+
+```bash
+pblast    # letzten Text-Eintrag ausgeben + direkt ins Clipboard kopieren
+```
+
+Nutzt `xclip` (Linux) oder `pbcopy` (macOS), falls vorhanden.
+
+---
+
+## pblist — Übersicht
+
+```bash
+pblist    # zeigt die letzten 30 Einträge mit ID, Typ, Größe, Zeit und Vorschau
+```
+
+Beispielausgabe:
+```
+ID          Typ     Größe     Zeit           Inhalt/Datei
+──────────────────────────────────────────────────────────────────────
+a1b2c3d4    image   48KB      14.02 09:31    screenshot.png
+e5f6g7h8    code    2KB       14.02 09:28    deploy.sh: #!/bin/bash
+i9j0k1l2    link    94B       14.02 09:15    https://example.com
+m3n4o5p6    file    [binary]  13.02 17:44    [binary] archiv.zip
+q7r8s9t0    text    38B       13.02 16:02    das ist mein text
+```
+
+Die **ID** aus `pblist` kann direkt in `pbpull <id>` und `pbpull <id> -o` verwendet werden.
 
 ---
 
@@ -246,10 +245,10 @@ Der Server stellt eine minimalistische REST-API bereit. Auth via `X-Token`-Heade
 **POST `/api/push` — Request-Body:**
 ```json
 {
-  "content": "mein text oder data:image/png;base64,...",
-  "label":   "optionales Label",
-  "type":    "text|code|link|image|file",
-  "filename": "dateiname.txt"
+  "content":  "text, dataURL (data:image/png;base64,...) oder Base64-Binärdaten",
+  "label":    "optionales Label",
+  "type":     "text|code|link|image|file",
+  "filename": "dateiname.zip"
 }
 ```
 
@@ -271,7 +270,6 @@ ExecStart=/usr/bin/python3 /opt/clipsync/clipsync_server.py
 WorkingDirectory=/opt/clipsync
 Restart=always
 RestartSec=5
-Environment=CLIPSYNC_HTTPS=1
 Environment=CLIPSYNC_TOKEN=meintoken
 
 [Install]
@@ -297,7 +295,7 @@ clipsync/
 └── README.md
 ```
 
-`clipsync_data.json`, `clipsync.crt` und `clipsync.key` sollten in `.gitignore` stehen:
+`clipsync_data.json`, `clipsync.crt` und `clipsync.key` gehören in die `.gitignore`:
 
 ```gitignore
 clipsync_data.json

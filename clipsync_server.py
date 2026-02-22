@@ -8,7 +8,7 @@ r"""
 ║    CLIPSYNC_PORT   = 8765  (default)               ║
 ║    CLIPSYNC_TOKEN  = ""    (leer = kein Auth)      ║
 ║    CLIPSYNC_HOST   = "0.0.0.0"                     ║
-║    CLIPSYNC_HTTPS  = "1"   (HTTPS aktivieren)      ║
+║    CLIPSYNC_HTTPS  = "1"   (Standard, "0" für HTTP) ║
 ║    CLIPSYNC_CERT   = "clipsync.crt"  (eigenes Cert)║
 ║    CLIPSYNC_KEY    = "clipsync.key"  (eigener Key) ║
 ╠════════════════════════════════════════════════════╣
@@ -31,7 +31,7 @@ from urllib.parse import urlparse, parse_qs
 PORT      = int(os.environ.get("CLIPSYNC_PORT", 8765))
 HOST      = os.environ.get("CLIPSYNC_HOST", "0.0.0.0")
 TOKEN     = os.environ.get("CLIPSYNC_TOKEN", "")
-USE_HTTPS = os.environ.get("CLIPSYNC_HTTPS", "0").strip() in ("1", "true", "yes")
+USE_HTTPS = os.environ.get("CLIPSYNC_HTTPS", "1").strip() not in ("0", "false", "no")
 CERT_FILE = os.environ.get("CLIPSYNC_CERT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "clipsync.crt"))
 KEY_FILE  = os.environ.get("CLIPSYNC_KEY",  os.path.join(os.path.dirname(os.path.abspath(__file__)), "clipsync.key"))
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clipsync_data.json")
@@ -114,14 +114,14 @@ def wrap_https(server):
 
 def load():
     try:
-        with open(DATA_FILE) as f:
+        with open(DATA_FILE, encoding="utf-8") as f:
             return json.load(f)
     except:
         return []
 
 def save(entries):
-    with open(DATA_FILE, "w") as f:
-        json.dump(entries[:MAX_ENTRIES], f, ensure_ascii=False, indent=2)
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(entries[:MAX_ENTRIES], f, ensure_ascii=True, indent=2)
 
 def detect_type(content):
     c = content.strip()
@@ -307,6 +307,7 @@ HTML = r"""<!DOCTYPE html>
         <span id="detail-title">–</span>
         <span id="detail-id" style="font-family:'JetBrains Mono',monospace;"></span>
         <button class="btn" id="copy-btn" onclick="copySelected()">kopieren</button>
+        <button class="btn" id="download-btn" onclick="downloadEntry(entries.find(x=>x.id===selected))" style="display:none" title="Als Datei herunterladen">↓</button>
         <button class="btn" onclick="deleteSelected()" style="color:#744; border-color:#2a1a1a;">✕</button>
       </div>
       <div id="detail-body"></div>
@@ -388,6 +389,12 @@ function renderDetail() {
   document.getElementById('detail-type').textContent = e.type;
   document.getElementById('detail-title').textContent = e.label || e.filename || 'kein Label';
   document.getElementById('detail-id').textContent = '#' + e.id;
+  // Dynamischer Button-Text + Download-Button je nach Typ
+  const copyBtn = document.getElementById('copy-btn');
+  copyBtn.textContent = updateCopyBtn(e);
+  const dlBtn = document.getElementById('download-btn');
+  const showDl = (e.type === 'image' || e.type === 'file');
+  dlBtn.style.display = showDl ? '' : 'none';
 
   const body = document.getElementById('detail-body');
   let html = '';
@@ -441,12 +448,73 @@ async function deleteSelected() {
 async function copySelected() {
   const e = entries.find(x => x.id === selected);
   if (!e) return;
-  await navigator.clipboard.writeText(e.content || '');
   const btn = document.getElementById('copy-btn');
-  btn.textContent = '✓ kopiert';
-  btn.style.color = 'var(--accent)';
-  btn.style.borderColor = 'var(--accent)';
-  setTimeout(() => { btn.textContent = 'kopieren'; btn.style.color = ''; btn.style.borderColor = ''; }, 1400);
+
+  const flash = (label) => {
+    btn.textContent = label;
+    btn.style.color = 'var(--accent)';
+    btn.style.borderColor = 'var(--accent)';
+    setTimeout(() => { btn.textContent = updateCopyBtn(e); btn.style.color = ''; btn.style.borderColor = ''; }, 1600);
+  };
+
+  if (e.type === 'image' && e.content && e.content.startsWith('data:image/')) {
+    // Bild als ClipboardItem – direkt in andere Apps einfügbar
+    try {
+      const [header, b64] = e.content.split(',');
+      const mime = header.match(/data:([^;]+)/)[1];
+      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: mime });
+      await navigator.clipboard.write([new ClipboardItem({ [mime]: blob })]);
+      flash('✓ Bild kopiert');
+    } catch (err) {
+      // Fallback: dataUrl als Text
+      await navigator.clipboard.writeText(e.content);
+      flash('✓ als dataURL');
+    }
+
+  } else if ((e.type === 'file' || e.type === 'image') &&
+             e.content && e.content.startsWith('[Binärdatei')) {
+    // Binärdatei ohne Vorschau → Download auslösen
+    downloadEntry(e);
+    flash('↓ download');
+
+  } else {
+    // Text, Code, Link → normal als Text
+    await navigator.clipboard.writeText(e.content || '');
+    flash('✓ kopiert');
+  }
+}
+
+function updateCopyBtn(e) {
+  if (!e) return 'kopieren';
+  if (e.type === 'image' && e.content && e.content.startsWith('data:image/')) return '⬚ bild kopieren';
+  if (e.type === 'file') return '↓ download';
+  return 'kopieren';
+}
+
+function downloadEntry(e) {
+  if (!e) return;
+  if (e.content && e.content.startsWith('data:')) {
+    // dataURL → direkter Download
+    const a = document.createElement('a');
+    a.href = e.content;
+    a.download = e.filename || e.label || 'download';
+    a.click();
+  } else if (e.type === 'image' && e.content && e.content.startsWith('data:image/')) {
+    const a = document.createElement('a');
+    a.href = e.content;
+    a.download = e.filename || 'image.png';
+    a.click();
+  } else {
+    // Text als Datei herunterladen
+    const blob = new Blob([e.content || ''], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = e.filename || e.label || 'clipsync.txt';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
 
 function setFilter(f) {
@@ -492,13 +560,20 @@ document.addEventListener('drop', e => {
   document.body.classList.remove('dragging');
   const file = e.dataTransfer.files[0];
   if (!file) return;
-  const reader = new FileReader();
-  if (file.type.startsWith('image/')) {
+  if (isRenderableImage(file)) {
+    const reader = new FileReader();
     reader.onload = ev => pushEntry(ev.target.result, file.name, 'image', file.name);
     reader.readAsDataURL(file);
-  } else {
+  } else if (isRenderableText(file) && file.size <= MAX_TEXT_SIZE) {
+    const reader = new FileReader();
     reader.onload = ev => pushEntry(ev.target.result, file.name, 'file', file.name);
     reader.readAsText(file);
+  } else {
+    notify(`Binärdatei: Metadaten gespeichert (${file.type || file.name})`, 'err');
+    pushEntry(
+      `[Binärdatei – keine Vorschau]\nName: ${file.name}\nGröße: ${(file.size/1024).toFixed(1)} KB\nTyp: ${file.type || 'unbekannt'}`,
+      file.name, 'file', file.name
+    );
   }
 });
 
@@ -540,63 +615,146 @@ function toggleTerminal() {
 <pre style="background:var(--bg);border:1px solid var(--border);padding:14px;overflow-x:auto;font-size:11px;color:var(--code-color);line-height:1.7;"># ── ClipSync ───────────────────────────────────────────────
 CLIPSYNC_HOST="${proto}//${host}"${tokenLine}
 
-# Letzten Eintrag pullen (Text im Terminal ausgeben)
-pbpull() {
-  python3 -c "
-import urllib.request, json, os
-url = os.environ.get('CLIPSYNC_HOST', '$CLIPSYNC_HOST') + '/api/latest'
-req = urllib.request.Request(url)
-token = os.environ.get('CLIPSYNC_TOKEN', '${TOKEN}')
-if token: req.add_header('X-Token', token)
-data = json.loads(urllib.request.urlopen(req).read())
-print(data.get('content', ''))
-"
+# ── pbpush: Text, Pipe oder Datei pushen ──────────────────
+# pbpush "text"              → Text
+# echo "text" | pbpush       → Text aus Pipe
+# pbpush datei.txt           → Textdatei
+# pbpush bild.png            → Bild (als dataURL)
+# pbpush archiv.zip          → Binärdatei (Base64)
+# pbpush archiv.zip "label"  → mit Label
+pbpush() {
+  python3 - "${'{'}{1:-}" "${'{'}{2:-}" "${'{'}{CLIPSYNC_HOST:-}" "${'{'}{CLIPSYNC_TOKEN:-}" << 'PYEOF'
+import sys, os, json, mimetypes, base64, urllib.request, ssl
+
+arg, label, host, token = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+ctx = ssl.create_default_context()
+ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+
+def push(payload):
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(host + '/api/push', data=data,
+          headers={'Content-Type': 'application/json', 'X-Token': token})
+    resp = json.loads(urllib.request.urlopen(req, context=ctx).read())
+    print(f"OK  id={resp.get('id','?')}  type={resp.get('type','?')}")
+
+if arg and os.path.isfile(arg):
+    filename = os.path.basename(arg)
+    mime, _ = mimetypes.guess_type(filename)
+    mime = mime or 'application/octet-stream'
+    with open(arg, 'rb') as f:
+        raw = f.read()
+    if mime.startswith('image/'):
+        push({'content': f"data:{mime};base64,{base64.b64encode(raw).decode()}",
+              'type': 'image', 'label': label or filename, 'filename': filename})
+    elif mime.startswith('text/') or mime in ('application/json','application/xml','application/javascript'):
+        code_exts = ('.py','.js','.ts','.sh','.json','.xml','.yaml','.yml','.sql','.css','.html')
+        etype = 'code' if any(filename.endswith(e) for e in code_exts) else 'file'
+        push({'content': raw.decode('utf-8', errors='replace'),
+              'type': etype, 'label': label or filename, 'filename': filename})
+    else:
+        push({'content': f"data:{mime};base64,{base64.b64encode(raw).decode()}",
+              'type': 'file', 'label': label or filename, 'filename': filename})
+elif not sys.stdin.isatty() and not arg:
+    push({'content': sys.stdin.read(), 'label': label})
+elif arg:
+    push({'content': arg, 'label': label})
+else:
+    print("Verwendung: pbpush 'text' | pbpush datei.zip | echo text | pbpush", file=sys.stderr)
+    sys.exit(1)
+PYEOF
 }
 
-# Letzten Eintrag direkt in Clipboard (Linux: xclip, macOS: pbcopy)
+# ── pbpull: Eintrag holen ─────────────────────────────────
+# pbpull                   → letzten Eintrag auf stdout
+# pbpull -o                → als Datei speichern (Originalname)
+# pbpull -o datei.zip      → unter diesem Namen speichern
+# pbpull -o ./ordner/      → in Ordner mit Originalname
+# pbpull <id>              → bestimmten Eintrag auf stdout
+# pbpull <id> -o [pfad]    → bestimmten Eintrag als Datei
+pbpull() {
+  python3 - "${'{'}{1:-}" "${'{'}{2:-}" "${'{'}{3:-}" "${'{'}{CLIPSYNC_HOST:-}" "${'{'}{CLIPSYNC_TOKEN:-}" << 'PYEOF'
+import sys, os, json, base64, urllib.request, ssl
+
+a1, a2, a3, host, token = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+ctx = ssl.create_default_context()
+ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+
+def fetch(path):
+    req = urllib.request.Request(host + path,
+          headers={'X-Token': token} if token else {})
+    return json.loads(urllib.request.urlopen(req, context=ctx).read())
+
+# Argumente parsen
+entry_id = None
+outpath  = None
+if a1 == '-o':
+    outpath = a2 if a2 else '.'
+elif a1 and not a1.startswith('-'):
+    entry_id = a1
+    if a2 == '-o':
+        outpath = a3 if a3 else '.'
+
+e        = fetch(f'/api/entry/{entry_id}' if entry_id else '/api/latest')
+content  = e.get('content', '')
+filename = e.get('filename') or e.get('label') or 'clipsync_download'
+is_bin   = content.startswith('data:') and ';base64,' in content
+
+if outpath is not None:
+    if outpath == '.' or os.path.isdir(outpath):
+        dest = os.path.join(outpath, filename)
+    else:
+        dest = outpath
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    if is_bin:
+        raw = base64.b64decode(content.split(';base64,', 1)[1])
+        with open(dest, 'wb') as f: f.write(raw)
+        print(f"Gespeichert: {dest}  ({len(raw):,} Bytes)")
+    else:
+        with open(dest, 'w', encoding='utf-8') as f: f.write(content)
+        print(f"Gespeichert: {dest}  ({len(content):,} Zeichen)")
+else:
+    if is_bin:
+        print(f"[Binärdatei: {filename}]  zum Speichern: pbpull -o {filename}")
+    else:
+        print(content)
+PYEOF
+}
+
+# ── pblast: Letzten Text-Eintrag in Clipboard ─────────────
 pblast() {
-  local content
-  content=$(pbpull)
-  echo "$content"
-  if command -v xclip &gt;/dev/null; then
-    echo -n "$content" | xclip -selection clipboard
-    echo "→ in Clipboard (xclip)"
-  elif command -v pbcopy &gt;/dev/null; then
-    echo -n "$content" | pbcopy
-    echo "→ in Clipboard (pbcopy)"
+  local out; out=$(pbpull)
+  echo "$out"
+  if command -v xclip &>/dev/null; then
+    echo -n "$out" | xclip -selection clipboard && echo "→ Clipboard (xclip)"
+  elif command -v pbcopy &>/dev/null; then
+    echo -n "$out" | pbcopy && echo "→ Clipboard (pbcopy)"
   fi
 }
 
-# Eintrag pushen: echo "text" | pbpush  ODER  pbpush "text"
-pbpush() {
-  local content="${1:-$(cat)}"
-  python3 -c "
-import urllib.request, json, os, sys
-content = sys.argv[1]
-url = os.environ.get('CLIPSYNC_HOST', '$CLIPSYNC_HOST') + '/api/push'
-data = json.dumps({'content': content}).encode()
-req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-token = os.environ.get('CLIPSYNC_TOKEN', '${TOKEN}')
-if token: req.add_header('X-Token', token)
-resp = json.loads(urllib.request.urlopen(req).read())
-print('OK:', resp.get('id','?'))
-" "$content"
-}
-
-# Alle Einträge auflisten
+# ── pblist: Übersicht aller Einträge ──────────────────────
 pblist() {
-  python3 -c "
-import urllib.request, json, os
-url = os.environ.get('CLIPSYNC_HOST', '$CLIPSYNC_HOST') + '/api/entries'
-req = urllib.request.Request(url)
-token = os.environ.get('CLIPSYNC_TOKEN', '${TOKEN}')
-if token: req.add_header('X-Token', token)
-data = json.loads(urllib.request.urlopen(req).read())
-for e in data['entries'][:20]:
-    t = e.get('type','?')
-    label = e.get('label','') or e.get('content','')[:40]
-    print(f\"{e['id']}  [{t:5}]  {label}\")
-"
+  python3 - "${'{'}{CLIPSYNC_HOST:-}" "${'{'}{CLIPSYNC_TOKEN:-}" << 'PYEOF'
+import sys, json, urllib.request, ssl, datetime
+host, token = sys.argv[1], sys.argv[2]
+ctx = ssl.create_default_context()
+ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+req = urllib.request.Request(host + '/api/entries',
+      headers={'X-Token': token} if token else {})
+data = json.loads(urllib.request.urlopen(req, context=ctx).read())
+print(f"{'ID':10}  {'Typ':6}  {'Größe':8}  {'Zeit':14}  Inhalt/Datei")
+print('─' * 70)
+for e in data.get('entries', [])[:30]:
+    t  = e.get('type','?')
+    c  = e.get('content','')
+    fn = e.get('filename','') or e.get('label','')
+    ts = datetime.datetime.fromtimestamp(e.get('ts',0)//1000).strftime('%d.%m %H:%M')
+    sz = f"{len(c)//1024}KB" if len(c)>1024 else f"{len(c)}B"
+    if c.startswith('data:') and ';base64,' in c:
+        preview = f"[binary] {fn}"
+    else:
+        preview = (fn+': ' if fn else '') + c[:40].replace('\n',' ')
+    print(f"{e['id']:10}  {t:6}  {sz:8}  {ts}  {preview}")
+PYEOF
 }
 # ─────────────────────────────────────────────────────────</pre>
 <p style="margin-top:14px; font-size:11px; color:var(--text3);">
@@ -608,13 +766,13 @@ for e in data['entries'][:20]:
   <code style="color:var(--accent);">pblast</code>   → Text ausgeben + in Clipboard<br>
   <code style="color:var(--accent);">pblist</code>   → alle Einträge anzeigen<br><br>
   <strong style="color:var(--text2);">Kein curl, kein wget</strong> – nur <code>python3</code> (stdlib).
+  Funktioniert auch mit selbstsigniertem HTTPS-Zertifikat.
 </p>`;
     m.style.display = 'block';
   } else {
     m.style.display = 'none';
   }
 }
-
 // ── Auth check display ────────────────────────────────────────────────────────
 function updateAuthStatus() {
   const el = document.getElementById('token-status');
@@ -646,7 +804,7 @@ class Handler(BaseHTTPRequestHandler):
                self.headers.get("Authorization") == f"Bearer {TOKEN}"
 
     def send_json(self, code, data):
-        body = json.dumps(data, ensure_ascii=False).encode()
+        body = json.dumps(data, ensure_ascii=True).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
@@ -655,7 +813,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_html(self, html):
-        body = html.encode()
+        body = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
@@ -664,7 +822,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", 0))
-        return json.loads(self.rfile.read(length)) if length else {}
+        if length == 0:
+            return {}
+        # 50 MB limit (base64 images can be large)
+        if length > 50 * 1024 * 1024:
+            self.rfile.read(length)  # drain socket
+            raise ValueError(f"Request too large: {length} bytes")
+        raw = self.rfile.read(length)
+        return json.loads(raw)
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -674,6 +839,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        try:
+            self._do_GET_inner()
+        except Exception as e:
+            print(f"  ✗ GET error: {e}")
+            try:
+                self.send_json(500, {"error": str(e)})
+            except:
+                pass
+
+    def _do_GET_inner(self):
         path = urlparse(self.path).path
 
         if path in ("/", "/index.html"):
@@ -708,6 +883,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        try:
+            self._do_POST_inner()
+        except Exception as e:
+            print(f"  ✗ POST error: {e}")
+            try:
+                self.send_json(500, {"error": str(e)})
+            except:
+                pass
+
+    def _do_POST_inner(self):
         if not self.check_auth():
             self.send_json(401, {"error": "unauthorized"})
             return
@@ -716,14 +901,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/push":
             body = self.read_body()
-            content = body.get("content", "").strip()
+            content = body.get("content", "")
+            if isinstance(content, str):
+                content = content.strip()
+            entry_type = body.get("type")
+            # Images have content = dataUrl (data:image/...) which is valid
             if not content:
                 self.send_json(400, {"error": "content required"})
                 return
             entry = new_entry(
                 content,
                 label=body.get("label", ""),
-                entry_type=body.get("type"),
+                entry_type=entry_type,
                 filename=body.get("filename"),
             )
             entries = load()
@@ -758,16 +947,28 @@ class Handler(BaseHTTPRequestHandler):
 # ── Main ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    proto = "https" if USE_HTTPS else "http"
     local_ip = get_local_ip()
 
+    # HTTPS ist Standard – nur deaktivieren wenn explizit CLIPSYNC_HTTPS=0
     if USE_HTTPS:
         if not ensure_cert():
-            print("  HTTPS deaktiviert – starte im HTTP-Modus.")
+            print()
+            print("  ┌─────────────────────────────────────────────────────┐")
+            print("  │  ⚠  HTTPS-Zertifikat konnte nicht erstellt werden.  │")
+            print("  │     Fallback auf HTTP.                               │")
+            print("  │     Moderne Browser blockieren ggf. Features wie:   │")
+            print("  │     • Clipboard API (Bilder kopieren)                │")
+            print("  │     • Secure Cookies                                 │")
+            print("  │     Empfehlung: openssl installieren und neu starten │")
+            print("  └─────────────────────────────────────────────────────┘")
+            print()
             USE_HTTPS = False
-            proto = "http"
+
+    proto = "https" if USE_HTTPS else "http"
 
     server = HTTPServer((HOST, PORT), Handler)
+    server.socket.settimeout(None)  # no global timeout, handled per-request
+    server.timeout = 30             # 30s per request max
 
     if USE_HTTPS:
         server = wrap_https(server)
@@ -794,10 +995,16 @@ if __name__ == "__main__":
 ╚══════════════════════════════════════════════════════╝{RESET}""")
 
     if USE_HTTPS:
-        print(f"""  {WARN}Selbstsigniertes Zertifikat:
-     Browser zeigt Sicherheitswarnung -> einmalig "Trotzdem fortfahren"
-     Firefox: "Erweitert" -> "Risiko akzeptieren"
-     Chrome:  "Erweitert" -> "Weiter zu {local_ip}"{RESET}
+        print(f"""  {WARN}Selbstsigniertes Zertifikat – einmalig im Browser bestätigen:
+     Chrome:  Erweitert → Weiter zu {local_ip}
+     Firefox: Erweitert → Risiko akzeptieren
+     Safari:  Details → Website trotzdem besuchen{RESET}
+""")
+    else:
+        print(f"""  {WARN}⚠  HTTP-Modus aktiv (kein HTTPS).
+     Eingeschränkte Browser-Features: Clipboard-API, Secure Cookies.
+     Zum Aktivieren: openssl installieren und Server neu starten.
+     Oder manuell: CLIPSYNC_HTTPS=1 python3 clipsync_server.py{RESET}
 """)
 
     try:
